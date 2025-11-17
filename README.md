@@ -8,7 +8,7 @@ A comprehensive deep learning pipeline for automatic food recognition and nutrit
 
 **Authors:** Abdelrahman Aboelata, Jaewook Kwon, Yufeng Zhan
 **Institution:** University of Maryland
-**Course:** CMSC 703 - Machine Learning
+**Course:** ENPM 703 - Machine Learning
 
 ---
 
@@ -291,7 +291,7 @@ This project is for academic research purposes only.
 - **Yufeng Zhan**: yxz2803@umd.edu
 
 **Institution:** University of Maryland, College Park
-**Course:** CMSC 703 - Machine Learning
+**Course:** ENPM 703 - Machine Learning
 
 ---
 
@@ -300,7 +300,7 @@ This project is for academic research purposes only.
 - Nutrition5k dataset creators (Google Research)
 - PyTorch and torchvision teams
 - timm library for pre-trained models
-- University of Maryland CMSC 703 course
+- University of Maryland ENPM 703 course
 
 ---
 
