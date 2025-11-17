@@ -1,0 +1,62 @@
+# EfficientNet Configuration for Food Classification
+#
+# Usage:
+#   python train_classifier.py --config configs/efficientnet.yaml
+
+# Inherit from base config
+inherit: base.yaml
+
+# Experiment name
+experiment:
+  name: nutrition5k_efficientnet_b0
+
+# Model configuration
+model:
+  name: FoodClassifier
+  backbone: efficientnet_b0  # Options: efficientnet_b0, efficientnet_b4
+  num_classes: 91  # Nutrition5k has 90 food classes + background
+  pretrained: true  # Use ImageNet pretrained weights
+  freeze_backbone: false  # Fine-tune entire model
+  dropout: 0.3
+
+# Data configuration
+data:
+  image_size: [224, 224]  # EfficientNet-B0 default
+  batch_size: 64  # Larger batch for faster training
+
+# Training overrides
+training:
+  num_epochs: 100
+  early_stopping_patience: 15
+
+# Optimizer overrides
+optimizer:
+  name: adamw
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+# Scheduler overrides
+scheduler:
+  name: cosine
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+
+# Augmentation
+augmentation:
+  random_crop: true
+  horizontal_flip: true
+  rotation_degrees: 15
+  color_jitter: 0.2
+  random_erasing: 0.1
+
+# Logging
+logging:
+  use_tensorboard: true
+  log_images: true
+  log_images_interval: 100
+
+# Expected results (for reference)
+# EfficientNet-B0:
+#   - Parameters: ~5M
+#   - Top-1 Accuracy: ~75-80% (target)
+#   - Training time: ~2-3 hours on single GPU

@@ -1,0 +1,69 @@
+# Vision Transformer Configuration for Food Classification
+#
+# Usage:
+#   python train_classifier.py --config configs/vit.yaml
+
+# Inherit from base config
+inherit: base.yaml
+
+# Experiment name
+experiment:
+  name: nutrition5k_vit_b16
+
+# Model configuration
+model:
+  name: FoodClassifier
+  backbone: vit_b16  # Vision Transformer Base, patch size 16
+  num_classes: 91
+  pretrained: true  # Use ImageNet-21k pretrained weights
+  freeze_backbone: false
+  dropout: 0.1  # Lower dropout for ViT
+
+# Data configuration
+data:
+  image_size: [224, 224]  # ViT standard input size
+  batch_size: 32  # ViT requires more memory, smaller batch
+
+# Training overrides
+training:
+  num_epochs: 100
+  early_stopping_patience: 15
+  gradient_clip_val: 1.0  # Important for ViT stability
+
+# Optimizer overrides
+optimizer:
+  name: adamw
+  lr: 3.0e-4  # Lower LR for ViT fine-tuning
+  weight_decay: 0.05  # Higher weight decay for ViT
+  betas: [0.9, 0.999]
+
+# Scheduler overrides
+scheduler:
+  name: cosine
+  warmup_epochs: 10  # Longer warmup for ViT
+  min_lr: 1.0e-6
+
+# Augmentation (ViT benefits from stronger augmentation)
+augmentation:
+  random_crop: true
+  horizontal_flip: true
+  rotation_degrees: 20
+  color_jitter: 0.4
+  random_erasing: 0.25
+
+  # Advanced augmentations for ViT
+  mixup: false  # Can enable for better accuracy
+  mixup_alpha: 0.2
+
+# Logging
+logging:
+  use_tensorboard: true
+  log_images: true
+  log_images_interval: 100
+
+# Expected results (for reference)
+# ViT-B/16:
+#   - Parameters: ~86M
+#   - Top-1 Accuracy: ~80-85% (target, better than EfficientNet)
+#   - Training time: ~4-6 hours on single GPU
+#   - Requires more data for best performance

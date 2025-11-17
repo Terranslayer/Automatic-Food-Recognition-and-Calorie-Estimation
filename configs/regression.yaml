@@ -1,0 +1,107 @@
+# Calorie Regression Configuration
+#
+# Usage:
+#   python train_regression.py --config configs/regression.yaml
+
+# Inherit from base config
+inherit: base.yaml
+
+# Experiment name
+experiment:
+  name: nutrition5k_calorie_regression
+
+# Model configuration
+model:
+  # Feature extractor (CNN backbone)
+  feature_extractor:
+    name: FoodClassifier
+    backbone: efficientnet_b0
+    pretrained: true
+    freeze_backbone: false  # Fine-tune for regression task
+
+  # Regression head
+  regressor:
+    name: CalorieRegressor
+    input_dim: 1280  # EfficientNet-B0 feature dimension
+    hidden_dims: [512, 256, 128]
+    output_dim: 5  # calories, protein, carb, fat, mass
+    dropout: 0.3
+    batch_norm: true
+    activation: relu
+
+  # Use geometric features
+  use_geometric_features: false  # Can enable for better performance
+
+# Data configuration
+data:
+  image_size: [224, 224]
+  batch_size: 64
+
+  # Regression-specific data settings
+  normalize_targets: true  # Normalize regression targets
+  target_normalization: standard  # Options: standard, minmax
+
+# Training overrides
+training:
+  num_epochs: 100
+  early_stopping_patience: 15
+  early_stopping_metric: val_mae  # Mean Absolute Error
+  early_stopping_mode: min
+
+# Loss function
+loss:
+  name: mse  # Options: mse, mae, smooth_l1, huber
+  # For multi-output regression
+  loss_weights:
+    calories: 1.0
+    protein: 0.5
+    carb: 0.5
+    fat: 0.5
+    mass: 0.3
+
+# Optimizer overrides
+optimizer:
+  name: adamw
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+# Scheduler overrides
+scheduler:
+  name: plateau
+  patience: 5
+  factor: 0.5
+  min_lr: 1.0e-6
+
+# Augmentation
+augmentation:
+  random_crop: true
+  horizontal_flip: true
+  rotation_degrees: 15
+  color_jitter: 0.2
+  random_erasing: 0.1
+
+# Evaluation metrics
+evaluation:
+  batch_size: 128
+  save_predictions: true
+  metrics:
+    - mae  # Mean Absolute Error
+    - mse  # Mean Squared Error
+    - mape  # Mean Absolute Percentage Error
+    - r2  # R-squared score
+
+  # Calorie-specific thresholds for analysis
+  calorie_bins: [0, 200, 400, 600, 800, 1000, 2000]  # For stratified analysis
+
+# Logging
+logging:
+  use_tensorboard: true
+  log_images: true
+  log_images_interval: 100
+
+# Expected results (for reference)
+# Calorie Regression (EfficientNet-B0 + MLP):
+#   - Parameters: ~5.8M total (5M backbone + 0.8M regressor)
+#   - MAE: ~100-150 kcal (target)
+#   - MAPE: ~20-30% (target)
+#   - Training time: ~2-3 hours on single GPU

@@ -1,0 +1,64 @@
+# Debug Configuration
+# For quick testing and validation (< 2 minutes)
+#
+# Usage:
+#   python train_classifier.py --debug
+#   python train_classifier.py --config configs/debug.yaml
+
+# Inherit from base config
+inherit: base.yaml
+
+# Override experiment settings
+experiment:
+  name: nutrition5k_debug
+  log_dir: ./experiments/debug
+
+# Override data settings
+data:
+  num_workers: 0  # Avoid multiprocessing overhead
+  subset_size: 10  # Use only 10 samples
+  pin_memory: false
+
+# Override training settings
+training:
+  batch_size: 4  # Small batch size
+  num_epochs: 1  # Only 1 epoch
+  log_interval: 1  # Log every batch
+  save_interval: 1
+  eval_interval: 1
+
+  early_stopping_patience: 100  # Disable early stopping
+  use_amp: false  # Disable AMP for debugging
+
+# Override optimizer settings
+optimizer:
+  lr: 1.0e-4  # Smaller LR for stability
+
+# Override scheduler settings
+scheduler:
+  warmup_epochs: 0  # No warmup
+
+# Disable augmentation for debugging
+augmentation:
+  random_crop: false
+  horizontal_flip: false
+  vertical_flip: false
+  rotation_degrees: 0
+  color_jitter: 0.0
+  random_erasing: 0.0
+  cutout: false
+  mixup: false
+
+# Logging
+logging:
+  use_tensorboard: false  # Disable for speed
+  use_wandb: false
+  log_gradients: false
+  log_weights: false
+  log_images: false
+
+# Evaluation
+evaluation:
+  batch_size: 4
+  save_predictions: false
+  save_visualizations: false

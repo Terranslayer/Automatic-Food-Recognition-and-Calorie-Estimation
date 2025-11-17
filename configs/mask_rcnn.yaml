@@ -1,0 +1,87 @@
+# Mask R-CNN Configuration for Food Instance Segmentation
+#
+# Usage:
+#   python train_segmentation.py --config configs/mask_rcnn.yaml
+
+# Inherit from base config
+inherit: base.yaml
+
+# Experiment name
+experiment:
+  name: nutrition5k_mask_rcnn
+
+# Model configuration
+model:
+  name: FoodSegmentation
+  num_classes: 91  # 90 food classes + background
+  backbone: resnet50  # ResNet-50-FPN backbone
+  pretrained: true  # Use COCO pretrained weights
+  trainable_backbone_layers: 3  # Fine-tune last 3 layers
+  min_size: 800  # Minimum image size
+  max_size: 1333  # Maximum image size
+
+# Data configuration
+data:
+  # Mask R-CNN handles variable image sizes
+  image_size: [800, 800]  # Target size (will be resized maintaining aspect ratio)
+  batch_size: 4  # Mask R-CNN requires significant memory
+
+  # Segmentation-specific data settings
+  return_masks: true
+  mask_threshold: 0.5  # Threshold for binary mask conversion
+
+# Training overrides
+training:
+  num_epochs: 50
+  early_stopping_patience: 10
+  gradient_accumulation_steps: 4  # Effective batch size = 16
+
+  # Mask R-CNN specific settings
+  use_amp: false  # Disable AMP for stability with Mask R-CNN
+  gradient_clip_val: 10.0  # Higher clip value for detection models
+
+# Optimizer overrides
+optimizer:
+  name: sgd  # SGD often works better for detection
+  lr: 0.005  # Standard Mask R-CNN learning rate
+  momentum: 0.9
+  weight_decay: 1.0e-4
+
+# Scheduler overrides
+scheduler:
+  name: step
+  step_size: 15  # Decay every 15 epochs
+  gamma: 0.1  # Multiply LR by 0.1
+  warmup_epochs: 1  # Short warmup
+
+# Augmentation for segmentation
+augmentation:
+  horizontal_flip: true
+  vertical_flip: false  # Avoid vertical flip for food images
+  rotation_degrees: 0  # No rotation to preserve spatial structure
+  color_jitter: 0.1  # Mild color jitter
+
+# Evaluation metrics
+evaluation:
+  batch_size: 2  # Smaller batch for evaluation
+  save_predictions: true
+  save_visualizations: true
+  num_visualizations: 100
+
+  # Detection-specific metrics
+  iou_threshold: 0.5  # IoU threshold for mAP calculation
+  score_threshold: 0.5  # Confidence threshold for predictions
+
+# Logging
+logging:
+  use_tensorboard: true
+  log_images: true
+  log_images_interval: 50  # More frequent logging for segmentation
+
+# Expected results (for reference)
+# Mask R-CNN (ResNet-50-FPN):
+#   - Parameters: ~44M
+#   - Model size: ~170MB
+#   - mAP@0.5: ~60-70% (target)
+#   - Training time: ~6-8 hours on single GPU
+#   - Inference time: ~0.5-1s per image

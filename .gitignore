@@ -1,0 +1,126 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# PyTorch
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific: Dataset (DO NOT COMMIT)
+data/
+datasets/
+nutrition5k/
+*.zip
+*.tar
+*.tar.gz
+
+# Project-specific: Experiments and outputs (DO NOT COMMIT)
+experiments/
+checkpoints/
+logs/
+runs/
+outputs/
+wandb/
+mlruns/
+
+# Project-specific: Large files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.avi
+*.h5
+*.hdf5
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+*.cache
+
+# OS-specific
+Thumbs.db
+.DS_Store
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Environment variables
+.env
+.env.local
+
+# TensorBoard
+events.out.tfevents.*
+
+# Weights & Biases
+wandb/
+
+# Project planning and coordination files (exclude from GitHub)
+PLAN.md
+handoff.md
+RESOURCE.md
+PR_PHASE3_MODELS.md
+METHODOLOGY_FOR_MILESTONE.md
+DATA_READY.md
+DOWNLOAD_GUIDE.md
+QUICK_START.md
+CLAUDE.md
+project proposal.txt
+
+# Temporary download and verification scripts (exclude from GitHub)
+scripts/download_gcs_direct.py
+scripts/verify_data.py
+scripts/verify_kaggle_metadata_match.py
+scripts/download_*.py
+scripts/verify_*.py
+download_simple.py

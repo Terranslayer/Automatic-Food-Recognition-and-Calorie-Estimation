@@ -1,0 +1,117 @@
+# Base Configuration for Nutrition5k Project
+# All experiments inherit from this configuration
+#
+# Usage:
+#   python train_classifier.py --config configs/efficientnet.yaml
+#   python train_segmentation.py --config configs/mask_rcnn.yaml
+
+# Experiment metadata
+experiment:
+  name: nutrition5k_baseline
+  random_seed: 42
+  deterministic: true  # Use deterministic algorithms for reproducibility
+  log_dir: ./experiments
+  checkpoint_dir: ./checkpoints
+
+# Dataset configuration
+data:
+  dataset_root: ./data/nutrition5k
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+
+  # Data splits (using official splits)
+  use_official_splits: true
+  split_dir: ./data/nutrition5k/dish_ids/splits
+
+  # Image preprocessing
+  image_size: [224, 224]  # Default for classification
+  normalize_mean: [0.485, 0.456, 0.406]  # ImageNet stats
+  normalize_std: [0.229, 0.224, 0.225]
+
+# Training configuration
+training:
+  batch_size: 32
+  num_epochs: 50
+  gradient_accumulation_steps: 1
+
+  # Logging
+  log_interval: 10  # Log every N batches
+  save_interval: 5   # Save checkpoint every N epochs
+  eval_interval: 1   # Evaluate every N epochs
+
+  # Early stopping
+  early_stopping_patience: 10
+  early_stopping_metric: val_loss
+  early_stopping_mode: min  # 'min' for loss, 'max' for accuracy
+
+  # Mixed precision training
+  use_amp: true  # Automatic mixed precision
+  gradient_clip_val: 1.0
+
+# Optimizer configuration
+optimizer:
+  name: adam  # Options: adam, adamw, sgd
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+
+  # SGD-specific
+  momentum: 0.9
+  nesterov: true
+
+# Learning rate scheduler
+scheduler:
+  name: cosine  # Options: cosine, step, plateau, exponential
+  warmup_epochs: 5
+  warmup_start_lr: 1.0e-6
+  min_lr: 1.0e-6
+
+  # Step scheduler
+  step_size: 10
+  gamma: 0.1
+
+  # Plateau scheduler
+  patience: 5
+  factor: 0.5
+
+# Data augmentation (for classification)
+augmentation:
+  # Training augmentations
+  random_crop: true
+  horizontal_flip: true
+  vertical_flip: false
+  rotation_degrees: 15
+  color_jitter: 0.2
+  random_erasing: 0.1
+
+  # Advanced augmentations
+  cutout: false
+  mixup: false
+  mixup_alpha: 0.2
+
+# Logging and monitoring
+logging:
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: nutrition5k
+  wandb_entity: null
+
+  # What to log
+  log_gradients: false
+  log_weights: false
+  log_images: true
+  log_images_interval: 100  # Log sample images every N batches
+
+# Hardware configuration
+hardware:
+  device: auto  # 'auto', 'cpu', 'cuda', 'cuda:0', etc.
+  num_gpus: 1
+  distributed: false
+
+# Model evaluation
+evaluation:
+  batch_size: 64  # Larger batch size for evaluation
+  save_predictions: true
+  save_visualizations: true
+  num_visualizations: 50  # Number of examples to visualize

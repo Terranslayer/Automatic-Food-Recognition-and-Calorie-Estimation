@@ -1,0 +1,160 @@
+# End-to-End Pipeline Configuration
+# Integrates segmentation, classification, and regression
+#
+# Usage:
+#   python train_end_to_end.py --config configs/end_to_end.yaml
+
+# Inherit from base config
+inherit: base.yaml
+
+# Experiment name
+experiment:
+  name: nutrition5k_end_to_end
+
+# Model configuration
+model:
+  name: EndToEndFoodRecognition
+  num_classes: 91
+
+  # Segmentation component (Mask R-CNN)
+  segmentation_config:
+    backbone: resnet50
+    pretrained: true
+    trainable_backbone_layers: 3
+    min_size: 800
+    max_size: 1333
+
+  # Classification component (EfficientNet)
+  classifier_config:
+    backbone: efficientnet_b0
+    pretrained: true
+    freeze_backbone: false
+    dropout: 0.3
+
+  # Regression component (MLP)
+  regressor_config:
+    hidden_dims: [512, 256, 128]
+    output_dim: 5  # calories, protein, carb, fat, mass
+    dropout: 0.3
+    batch_norm: true
+
+  # Pipeline settings
+  use_geometric_features: true  # Use geometric features from segmentation
+  aggregate_method: sum  # How to combine multi-instance predictions (sum/mean)
+  min_detection_score: 0.5  # Minimum confidence for detections
+
+# Data configuration
+data:
+  image_size: [800, 800]  # For segmentation component
+  batch_size: 2  # End-to-end model requires significant memory
+
+  # Multi-task data settings
+  mode: end_to_end  # Dataset returns all annotations
+
+# Training overrides
+training:
+  num_epochs: 50
+  early_stopping_patience: 10
+  gradient_accumulation_steps: 8  # Effective batch size = 16
+
+  # Multi-stage training strategy
+  training_strategy: joint  # Options: joint, sequential
+
+  # Sequential training stages (if using sequential strategy)
+  sequential_stages:
+    - component: segmentation
+      epochs: 20
+      freeze_others: true
+    - component: classifier
+      epochs: 15
+      freeze_others: true
+    - component: regressor
+      epochs: 15
+      freeze_others: true
+    - component: all
+      epochs: 10
+      freeze_others: false  # Fine-tune all together
+
+# Loss configuration
+loss:
+  # Multi-task loss weights
+  weights:
+    segmentation: 1.0
+    classification: 0.5
+    regression: 1.0
+
+  # Component-specific losses
+  segmentation_loss: mask_rcnn  # Built-in Mask R-CNN losses
+  classification_loss: cross_entropy
+  regression_loss: smooth_l1
+
+# Optimizer overrides
+optimizer:
+  name: adamw
+  lr: 1.0e-4  # Lower LR for end-to-end training
+  weight_decay: 1.0e-4
+
+# Scheduler overrides
+scheduler:
+  name: step
+  step_size: 15
+  gamma: 0.1
+  warmup_epochs: 2
+
+# Augmentation (conservative for end-to-end)
+augmentation:
+  horizontal_flip: true
+  vertical_flip: false
+  rotation_degrees: 0  # Avoid rotation for segmentation
+  color_jitter: 0.1
+
+# Evaluation metrics
+evaluation:
+  batch_size: 1  # Process one image at a time
+  save_predictions: true
+  save_visualizations: true
+  num_visualizations: 100
+
+  # Multi-task evaluation
+  metrics:
+    segmentation:
+      - mAP  # Mean Average Precision
+      - IoU  # Intersection over Union
+    classification:
+      - accuracy
+      - top5_accuracy
+    regression:
+      - mae  # Mean Absolute Error
+      - mape  # Mean Absolute Percentage Error
+
+# Logging
+logging:
+  use_tensorboard: true
+  log_images: true
+  log_images_interval: 25
+
+  # What to log for each component
+  log_segmentation_masks: true
+  log_classification_predictions: true
+  log_regression_scatter: true
+
+# Hardware configuration
+hardware:
+  device: auto
+  num_gpus: 1
+  distributed: false  # Can enable for multi-GPU training
+
+# Expected results (for reference)
+# End-to-End Pipeline:
+#   - Total parameters: ~49M (44M seg + 4M cls + 1M reg)
+#   - Segmentation mAP: ~60-70%
+#   - Classification Acc: ~75-80%
+#   - Calorie MAE: ~100-150 kcal
+#   - Training time: ~10-12 hours on single GPU
+#   - Inference time: ~1-2s per image (full pipeline)
+
+# Notes:
+# - This pipeline is computationally expensive
+# - Consider using --debug flag for initial testing
+# - Multi-GPU training recommended for faster convergence
+# - Sequential training strategy may be more stable than joint
