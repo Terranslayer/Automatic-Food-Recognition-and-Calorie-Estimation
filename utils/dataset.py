@@ -420,23 +420,23 @@ def get_datasets(root: str, task: str = 'classification', image_size: Tuple[int,
 
     # Create datasets based on task
     train_dataset = Nutrition5kDataset(
-        root=root,
+        root_dir=root,
         split='train',
-        task=task,
+        mode=task,
         transform=train_transforms
     )
 
     val_dataset = Nutrition5kDataset(
-        root=root,
+        root_dir=root,
         split='val',
-        task=task,
+        mode=task,
         transform=val_transforms
     )
 
     test_dataset = Nutrition5kDataset(
-        root=root,
+        root_dir=root,
         split='test',
-        task=task,
+        mode=task,
         transform=test_transforms
     )
 

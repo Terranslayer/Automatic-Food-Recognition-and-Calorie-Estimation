@@ -33,7 +33,7 @@ from utils.metrics import (
     mae,
     rmse,
     mape,
-    r2_score,
+    r2,
     MetricAggregator
 )
 from utils.checkpoint import load_checkpoint
@@ -388,7 +388,7 @@ def evaluate_regression(
         metrics[f'{name}_mae'] = float(mae(preds, targets))
         metrics[f'{name}_rmse'] = float(rmse(preds, targets))
         metrics[f'{name}_mape'] = float(mape(preds, targets))
-        metrics[f'{name}_r2'] = float(r2_score(preds, targets))
+        metrics[f'{name}_r2'] = float(r2(preds, targets))
 
     # Compute overall metrics (averaged across outputs)
     metrics['overall_mae'] = np.mean([metrics[f'{name}_mae'] for name in output_names])

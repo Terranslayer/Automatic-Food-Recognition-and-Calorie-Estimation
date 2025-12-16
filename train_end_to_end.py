@@ -401,6 +401,12 @@ def main():
             lr=config['optimizer']['lr'],
             weight_decay=config['optimizer'].get('weight_decay', 0)
         )
+    elif optimizer_name == 'adamw':
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config['optimizer']['lr'],
+            weight_decay=config['optimizer'].get('weight_decay', 0.01)
+        )
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
@@ -428,8 +434,8 @@ def main():
     if args.debug:
         exp_name += "_debug"
 
-    log_dir = Path(config['logging']['log_dir']) / exp_name
-    logger = Logger(log_dir, use_tensorboard=config['logging']['use_tensorboard'])
+    log_dir = Path(config['experiment'].get('log_dir', './experiments')) / exp_name
+    logger = Logger(log_dir, experiment_name=exp_name, use_tensorboard=config['logging'].get('use_tensorboard', True))
     print(f"\nLogging to: {log_dir}")
 
     # Setup checkpoint manager
@@ -524,10 +530,10 @@ def main():
             else:
                 patience_counter += 1
 
-            checkpoint_manager.save_checkpoint(
-                epoch=epoch,
+            checkpoint_manager.save(
                 model=model,
                 optimizer=optimizer,
+                epoch=epoch,
                 metrics={
                     'train_loss': train_results['total_loss'],
                     'val_loss': val_results['total_loss'],
@@ -535,11 +541,9 @@ def main():
                     'val_cls_loss': val_results['cls_loss'],
                     'val_reg_loss': val_results['reg_loss'],
                     'best_val_loss': best_val_loss,
-                    'normalization_mean': mean.cpu(),
-                    'normalization_std': std.cpu()
                 },
-                is_best=is_best,
-                config=config
+                config=config,
+                force_save=is_best
             )
 
             # Early stopping check

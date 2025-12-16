@@ -298,7 +298,7 @@ def main():
 
     # Print config summary
     print("\nConfiguration Summary:")
-    print(f"  Model: {config['model']['name']}")
+    print(f"  Model: CalorieRegressor (with {config['model'].get('feature_extractor', {}).get('backbone', 'efficientnet_b0')} backbone)")
     print(f"  Num outputs: 5 (calories, protein, carb, fat, mass)")
     print(f"  Batch size: {config['training']['batch_size']}")
     print(f"  Num epochs: {config['training']['num_epochs']}")
@@ -367,6 +367,12 @@ def main():
             lr=config['optimizer']['lr'],
             weight_decay=config['optimizer'].get('weight_decay', 0)
         )
+    elif optimizer_name == 'adamw':
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config['optimizer']['lr'],
+            weight_decay=config['optimizer'].get('weight_decay', 0.01)
+        )
     elif optimizer_name == 'sgd':
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -401,8 +407,8 @@ def main():
     if args.debug:
         exp_name += "_debug"
 
-    log_dir = Path(config['logging']['log_dir']) / exp_name
-    logger = Logger(log_dir, use_tensorboard=config['logging']['use_tensorboard'])
+    log_dir = Path(config['experiment'].get('log_dir', './experiments')) / exp_name
+    logger = Logger(log_dir, experiment_name=exp_name, use_tensorboard=config['logging'].get('use_tensorboard', True))
     print(f"\nLogging to: {log_dir}")
 
     # Setup checkpoint manager
@@ -496,10 +502,10 @@ def main():
             else:
                 patience_counter += 1
 
-            checkpoint_manager.save_checkpoint(
-                epoch=epoch,
+            checkpoint_manager.save(
                 model=model,
                 optimizer=optimizer,
+                epoch=epoch,
                 metrics={
                     'train_loss': train_results['loss'],
                     'val_loss': val_results['loss'],
@@ -509,11 +515,9 @@ def main():
                     'val_mae_fat': val_results['mae_fat'],
                     'val_mae_mass': val_results['mae_mass'],
                     'best_val_loss': best_val_loss,
-                    'normalization_mean': mean.cpu(),
-                    'normalization_std': std.cpu()
                 },
-                is_best=is_best,
-                config=config
+                config=config,
+                force_save=is_best
             )
 
             # Early stopping check
