@@ -1,0 +1,82 @@
+# Ingredient Mass Regression Configuration
+# Phase 5.5.6: Ingredient-Aware Calorie Decomposition
+#
+# This config trains a multi-output regressor to predict
+# ingredient masses from image features.
+
+inherit: base.yaml
+
+experiment:
+  name: ingredient_mass_regression
+  random_seed: 42
+  deterministic: true
+  log_dir: ./experiments/phase5.5_ingredient
+
+# Model configuration
+model:
+  # Use EfficientNet-B0 as feature extractor (frozen)
+  backbone: efficientnet_b0
+  pretrained: true
+  freeze_backbone: true
+
+  # Regressor head for top-K ingredients
+  regressor:
+    hidden_dims: [512, 256]
+    dropout: 0.3
+    num_outputs: 50  # Top-50 most common ingredients
+
+# Dataset configuration
+data:
+  dataset_root: ./data/nutrition5k
+  mode: regression  # Will be extended for ingredient-level targets
+  num_workers: 4
+  pin_memory: true
+
+  # Image preprocessing
+  image_size: [224, 224]
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+# Training configuration
+training:
+  batch_size: 32
+  num_epochs: 30
+  gradient_accumulation_steps: 1
+
+  # Logging
+  log_interval: 10
+  save_interval: 5
+  eval_interval: 1
+
+  # Early stopping
+  early_stopping_patience: 10
+  early_stopping_metric: val_loss
+  early_stopping_mode: min
+
+  # Mixed precision
+  use_amp: true
+  gradient_clip_val: 1.0
+
+# Optimizer
+optimizer:
+  name: adamw
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+# Scheduler
+scheduler:
+  name: cosine
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+
+# Loss function
+loss:
+  name: mse  # Mean squared error for mass prediction
+  reduction: mean
+
+# Evaluation
+evaluation:
+  metrics:
+    - mae  # Mean absolute error
+    - rmse  # Root mean squared error
+    - r2    # R-squared

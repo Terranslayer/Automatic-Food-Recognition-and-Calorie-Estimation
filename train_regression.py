@@ -28,6 +28,7 @@ from utils.logger import Logger
 from utils.metrics import MetricsTracker
 from utils.checkpoint import CheckpointManager
 from models.calorie_regressor import CalorieRegressor
+from models.classifier import FoodClassifier
 
 
 def parse_args():
@@ -64,6 +65,18 @@ def set_random_seed(seed, deterministic=False):
         torch.use_deterministic_algorithms(True, warn_only=True)
 
 
+def get_nutrition_targets(batch, device):
+    """Extract nutrition targets from batch and stack them into a tensor."""
+    targets = torch.stack([
+        batch['calories'],
+        batch['protein_g'],
+        batch['carb_g'],
+        batch['fat_g'],
+        batch['mass_g']
+    ], dim=1).to(device)
+    return targets
+
+
 def compute_normalization_stats(train_loader, device):
     """Compute mean and std for target normalization."""
     print("\nComputing normalization statistics...")
@@ -71,13 +84,16 @@ def compute_normalization_stats(train_loader, device):
     all_targets = []
 
     for batch in tqdm(train_loader, desc="Computing stats"):
-        targets = batch['nutrition'].to(device)
+        targets = get_nutrition_targets(batch, device)
         all_targets.append(targets.cpu().numpy())
 
     all_targets = np.concatenate(all_targets, axis=0)
 
     mean = np.mean(all_targets, axis=0)
     std = np.std(all_targets, axis=0)
+
+    # Avoid division by zero - replace 0 std with 1
+    std = np.where(std < 1e-6, 1.0, std)
 
     print(f"\nNormalization stats computed:")
     labels = ['calories', 'protein', 'carb', 'fat', 'mass']
@@ -169,7 +185,7 @@ def compute_metrics(predictions, targets, mean, std):
     }
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device, metrics, logger, epoch, config, mean, std):
+def train_epoch(model, feature_extractor, train_loader, criterion, optimizer, device, metrics, logger, epoch, config, mean, std):
     """Train for one epoch."""
     model.train()
     metrics.reset()
@@ -180,14 +196,18 @@ def train_epoch(model, train_loader, criterion, optimizer, device, metrics, logg
     pbar = tqdm(train_loader, desc=f'Epoch {epoch} [Train]')
     for batch_idx, batch in enumerate(pbar):
         images = batch['image'].to(device)
-        targets = batch['nutrition'].to(device)
+        targets = get_nutrition_targets(batch, device)
 
         # Normalize targets
         targets_norm = (targets - mean) / std
 
+        # Extract features
+        with torch.no_grad():
+            features = feature_extractor.extract_features(images)
+
         # Forward pass
         optimizer.zero_grad()
-        outputs = model(images)
+        outputs = model(features)
         loss = criterion(outputs, targets_norm)
 
         # Backward pass
@@ -221,7 +241,7 @@ def train_epoch(model, train_loader, criterion, optimizer, device, metrics, logg
     return metrics.get_averages()
 
 
-def validate(model, val_loader, criterion, device, metrics, logger, epoch, mean, std):
+def validate(model, feature_extractor, val_loader, criterion, device, metrics, logger, epoch, mean, std):
     """Validate the model."""
     model.eval()
     metrics.reset()
@@ -232,13 +252,16 @@ def validate(model, val_loader, criterion, device, metrics, logger, epoch, mean,
     with torch.no_grad():
         for batch in pbar:
             images = batch['image'].to(device)
-            targets = batch['nutrition'].to(device)
+            targets = get_nutrition_targets(batch, device)
 
             # Normalize targets
             targets_norm = (targets - mean) / std
 
+            # Extract features
+            features = feature_extractor.extract_features(images)
+
             # Forward pass
-            outputs = model(images)
+            outputs = model(features)
             loss = criterion(outputs, targets_norm)
 
             # Compute metrics
@@ -332,19 +355,49 @@ def main():
     print("Creating Model")
     print("="*80)
 
+    # Get model config
+    fe_config = config['model'].get('feature_extractor', {})
+    regressor_config = config['model'].get('regressor', {})
+
+    backbone = fe_config.get('backbone', 'efficientnet_b0')
+    pretrained = fe_config.get('pretrained', True)
+    freeze_backbone = fe_config.get('freeze_backbone', False)
+
+    input_dim = regressor_config.get('input_dim', 1280)
+    hidden_dims = tuple(regressor_config.get('hidden_dims', [512, 256, 128]))
+    output_dim = regressor_config.get('output_dim', 5)
+    dropout = regressor_config.get('dropout', 0.3)
+
+    # Create feature extractor (classifier without final layer)
+    feature_extractor = FoodClassifier(
+        num_classes=132,  # Not used for feature extraction
+        backbone=backbone,
+        pretrained=pretrained
+    )
+    if freeze_backbone:
+        feature_extractor.freeze_backbone()
+    feature_extractor = feature_extractor.to(device)
+    feature_extractor.eval()  # Keep in eval mode for feature extraction
+
+    # Create regressor
     model = CalorieRegressor(
-        backbone=config['model']['name'],
-        num_outputs=5,  # calories, protein, carb, fat, mass
-        pretrained=config['model']['pretrained']
+        input_dim=input_dim,
+        hidden_dims=hidden_dims,
+        output_dim=output_dim,
+        dropout=dropout
     )
     model = model.to(device)
 
     # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
+    fe_params = sum(p.numel() for p in feature_extractor.parameters())
+    reg_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\nModel created: {config['model']['name']}")
+    total_params = fe_params + reg_params
+    print(f"\nModel created:")
+    print(f"  Feature Extractor: {backbone} ({fe_params:,} params)")
+    print(f"  Regressor: CalorieRegressor ({reg_params:,} params)")
     print(f"  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
+    print(f"  Trainable regressor params: {trainable_params:,}")
 
     # Setup loss function
     loss_name = config['training'].get('loss', 'smooth_l1')
@@ -403,7 +456,7 @@ def main():
         print(f"Scheduler: {scheduler_name}")
 
     # Setup logger
-    exp_name = f"{config['model']['name']}_regression"
+    exp_name = f"CalorieRegressor_regression"
     if args.debug:
         exp_name += "_debug"
 
@@ -462,13 +515,13 @@ def main():
 
             # Train
             train_results = train_epoch(
-                model, train_loader, criterion, optimizer,
+                model, feature_extractor, train_loader, criterion, optimizer,
                 device, train_metrics, logger, epoch, config, mean, std
             )
 
             # Validate
             val_results = validate(
-                model, val_loader, criterion, device,
+                model, feature_extractor, val_loader, criterion, device,
                 val_metrics_tracker, logger, epoch, mean, std
             )
 

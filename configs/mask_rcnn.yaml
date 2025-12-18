@@ -13,7 +13,7 @@ experiment:
 # Model configuration
 model:
   name: FoodSegmentation
-  num_classes: 91  # 90 food classes + background
+  num_classes: 155  # 154 food classes + 1 background
   backbone: resnet50  # ResNet-50-FPN backbone
   pretrained: true  # Use COCO pretrained weights
   trainable_backbone_layers: 3  # Fine-tune last 3 layers
@@ -32,9 +32,11 @@ data:
 
 # Training overrides
 training:
+  batch_size: 16  # Reduced for 75% GPU memory limit
   num_epochs: 50
   early_stopping_patience: 10
-  gradient_accumulation_steps: 4  # Effective batch size = 16
+  gradient_accumulation_steps: 4  # Effective batch size = 64
+  gpu_memory_fraction: 0.75  # Limit GPU memory to 75%
 
   # Mask R-CNN specific settings
   use_amp: false  # Disable AMP for stability with Mask R-CNN

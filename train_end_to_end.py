@@ -4,6 +4,7 @@ Training script for end-to-end food recognition model.
 Supports:
 - Multi-task learning: segmentation + classification + regression
 - Weighted loss combination
+- Mixed precision training (AMP) for memory efficiency
 - Debug mode for quick testing
 - Resume from checkpoint
 - TensorBoard logging
@@ -18,6 +19,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import numpy as np
 
@@ -102,6 +104,9 @@ def compute_normalization_stats(train_loader, device):
     mean = np.mean(all_targets, axis=0)
     std = np.std(all_targets, axis=0)
 
+    # Avoid division by zero - replace 0 std with 1
+    std = np.where(std < 1e-6, 1.0, std)
+
     print(f"\nNormalization stats computed:")
     labels = ['calories', 'protein', 'carb', 'fat', 'mass']
     for i, label in enumerate(labels):
@@ -172,17 +177,25 @@ def create_data_loaders(config, debug=False):
         sys.exit(1)
 
 
-def train_epoch(model, train_loader, optimizer, device, metrics, logger, epoch, config, mean, std):
-    """Train for one epoch."""
+def train_epoch(model, train_loader, optimizer, device, metrics, logger, epoch, config, mean, std, scaler=None):
+    """Train for one epoch with optional mixed precision."""
     model.train()
     metrics.reset()
 
     log_interval = config['training'].get('log_interval', 10)
+    use_amp = config['training'].get('use_amp', False) and scaler is not None
 
     # Loss weights
     seg_weight = config['training'].get('segmentation_weight', 1.0)
     cls_weight = config['training'].get('classification_weight', 1.0)
     reg_weight = config['training'].get('regression_weight', 1.0)
+
+    # Regression loss scale factor to prevent gradient explosion
+    # Raw MSE on calories can be ~40000, scale down to ~40 for stability
+    reg_loss_scale = config['training'].get('regression_loss_scale', 0.001)
+
+    # Gradient clipping to prevent explosion
+    max_grad_norm = config['training'].get('max_grad_norm', 1.0)
 
     pbar = tqdm(train_loader, desc=f'Epoch {epoch} [Train]')
     for batch_idx, batch in enumerate(pbar):
@@ -192,23 +205,60 @@ def train_epoch(model, train_loader, optimizer, device, metrics, logger, epoch, 
         labels = batch['labels'].to(device)
         nutrition = batch['nutrition'].to(device)
 
-        # Normalize nutrition targets
-        nutrition_norm = (nutrition - mean) / std
+        # FIX: Use raw nutrition values instead of normalized
+        # This ensures model outputs are in real calorie space, not normalized space
+        # The model will learn to predict actual calorie values directly
 
-        # Forward pass
+        # Forward pass with optional AMP
         optimizer.zero_grad()
-        outputs = model(images, targets, labels, nutrition_norm)
 
-        # Compute weighted total loss
-        total_loss = (
-            seg_weight * outputs['segmentation_loss'] +
-            cls_weight * outputs['classification_loss'] +
-            reg_weight * outputs['regression_loss']
-        )
+        if use_amp:
+            with autocast():
+                outputs = model.training_forward(images, targets, labels, nutrition)
+                # Scale regression loss to prevent gradient explosion
+                scaled_reg_loss = outputs['regression_loss'] * reg_loss_scale
+                # Compute weighted total loss
+                total_loss = (
+                    seg_weight * outputs['segmentation_loss'] +
+                    cls_weight * outputs['classification_loss'] +
+                    reg_weight * scaled_reg_loss
+                )
 
-        # Backward pass
-        total_loss.backward()
-        optimizer.step()
+            # Check for NaN loss and skip batch if needed
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                print(f"\nWARNING: NaN/Inf loss detected at batch {batch_idx}, skipping...")
+                optimizer.zero_grad()
+                continue
+
+            # Backward pass with scaler
+            scaler.scale(total_loss).backward()
+            # Unscale gradients and clip
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model.training_forward(images, targets, labels, nutrition)
+            # Scale regression loss to prevent gradient explosion
+            scaled_reg_loss = outputs['regression_loss'] * reg_loss_scale
+            # Compute weighted total loss
+            total_loss = (
+                seg_weight * outputs['segmentation_loss'] +
+                cls_weight * outputs['classification_loss'] +
+                reg_weight * scaled_reg_loss
+            )
+
+            # Check for NaN loss and skip batch if needed
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                print(f"\nWARNING: NaN/Inf loss detected at batch {batch_idx}, skipping...")
+                optimizer.zero_grad()
+                continue
+
+            # Backward pass
+            total_loss.backward()
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
 
         # Update metrics
         with torch.no_grad():
@@ -245,10 +295,15 @@ def train_epoch(model, train_loader, optimizer, device, metrics, logger, epoch, 
     return metrics.get_averages()
 
 
-def validate(model, val_loader, device, metrics, logger, epoch, mean, std):
+def validate(model, val_loader, device, metrics, logger, epoch, mean, std, config=None):
     """Validate the model."""
-    model.eval()
+    model.train()  # Keep in train mode to get losses from Mask R-CNN
     metrics.reset()
+
+    # Get regression loss scale from config (same as training)
+    reg_loss_scale = 0.001
+    if config:
+        reg_loss_scale = config['training'].get('regression_loss_scale', 0.001)
 
     pbar = tqdm(val_loader, desc=f'Epoch {epoch} [Val]')
     with torch.no_grad():
@@ -259,18 +314,23 @@ def validate(model, val_loader, device, metrics, logger, epoch, mean, std):
             labels = batch['labels'].to(device)
             nutrition = batch['nutrition'].to(device)
 
-            # Normalize nutrition targets
-            nutrition_norm = (nutrition - mean) / std
-
+            # FIX: Use raw nutrition values instead of normalized
             # Forward pass
-            outputs = model(images, targets, labels, nutrition_norm)
+            outputs = model.training_forward(images, targets, labels, nutrition)
+
+            # Scale regression loss (same as training)
+            scaled_reg_loss = outputs['regression_loss'] * reg_loss_scale
 
             # Compute total loss (unweighted for validation)
             total_loss = (
                 outputs['segmentation_loss'] +
                 outputs['classification_loss'] +
-                outputs['regression_loss']
+                scaled_reg_loss
             )
+
+            # Skip NaN losses
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                continue
 
             # Update metrics
             metrics.update('total_loss', total_loss.item())
@@ -328,7 +388,7 @@ def main():
 
     # Debug mode overrides
     if args.debug:
-        config['training']['batch_size'] = 1
+        config['training']['batch_size'] = 2  # Need >= 2 for BatchNorm
         config['training']['num_epochs'] = 1
         config['training']['log_interval'] = 1
         config['data']['num_workers'] = 0
@@ -361,6 +421,13 @@ def main():
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nUsing device: {device}")
 
+    # Limit GPU memory usage
+    if device.type == 'cuda':
+        gpu_memory_fraction = config.get('training', {}).get('gpu_memory_fraction', 0.75)
+        device_index = device.index if device.index is not None else 0
+        torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction, device_index)
+        print(f"GPU memory limited to: {gpu_memory_fraction * 100:.0f}%")
+
     # Create data loaders
     train_loader, val_loader = create_data_loaders(config, args.debug)
 
@@ -374,8 +441,12 @@ def main():
 
     model = EndToEndFoodRecognition(
         num_classes=config['model']['num_classes'],
-        num_regression_outputs=5,
-        pretrained=config['model']['pretrained']
+        segmentation_config=config['model'].get('segmentation_config', {}),
+        classifier_config=config['model'].get('classifier_config', {}),
+        regressor_config=config['model'].get('regressor_config', {}),
+        use_geometric_features=config['model'].get('use_geometric_features', True),
+        aggregate_method=config['model'].get('aggregate_method', 'sum'),
+        min_detection_score=config['model'].get('min_detection_score', 0.5),
     )
     model = model.to(device)
 
@@ -475,6 +546,15 @@ def main():
     patience = config['training'].get('early_stopping_patience', 10)
     patience_counter = 0
 
+    # Setup mixed precision training (AMP)
+    use_amp = config['training'].get('use_amp', False)
+    scaler = None
+    if use_amp and device.type == 'cuda':
+        scaler = GradScaler()
+        print(f"Mixed precision training (AMP): Enabled")
+    else:
+        print(f"Mixed precision training (AMP): Disabled")
+
     # Training loop
     print("\n" + "="*80)
     print("Starting Training")
@@ -490,13 +570,13 @@ def main():
             # Train
             train_results = train_epoch(
                 model, train_loader, optimizer,
-                device, train_metrics, logger, epoch, config, mean, std
+                device, train_metrics, logger, epoch, config, mean, std, scaler
             )
 
             # Validate
             val_results = validate(
                 model, val_loader, device,
-                val_metrics_tracker, logger, epoch, mean, std
+                val_metrics_tracker, logger, epoch, mean, std, config
             )
 
             # Update scheduler

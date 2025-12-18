@@ -14,7 +14,7 @@ experiment:
 model:
   name: FoodClassifier
   backbone: vit_b16  # Vision Transformer Base, patch size 16
-  num_classes: 91
+  num_classes: 154  # Updated to match Nutrition5k global classes
   pretrained: true  # Use ImageNet-21k pretrained weights
   freeze_backbone: false
   dropout: 0.1  # Lower dropout for ViT

@@ -44,8 +44,12 @@ from models.end_to_end import EndToEndFoodRecognition
 
 
 def collate_fn(batch):
-    """Custom collate function for segmentation/detection datasets."""
-    return tuple(zip(*batch))
+    """Custom collate function for segmentation/detection datasets.
+
+    Returns batch as list of sample dicts instead of transposing.
+    """
+    # Return as list of dicts for segmentation/detection
+    return batch
 
 
 def parse_args() -> argparse.Namespace:
@@ -135,6 +139,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def detect_backbone_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
+    """
+    Detect backbone type from state_dict keys.
+
+    Args:
+        state_dict: Model state dictionary
+
+    Returns:
+        Detected backbone type ('efficientnet_b0' or 'vit_b16')
+    """
+    # Check for EfficientNet-specific keys
+    efficientnet_keys = ['backbone.conv_stem.weight', 'backbone._bn0.weight', 'backbone._blocks.0']
+    vit_keys = ['backbone.cls_token', 'backbone.patch_embed', 'backbone.blocks.0']
+
+    state_keys = list(state_dict.keys())
+    state_keys_str = ' '.join(state_keys[:50])  # Check first 50 keys
+
+    # Check for EfficientNet patterns
+    for key in efficientnet_keys:
+        if any(key in k for k in state_keys):
+            return 'efficientnet_b0'
+
+    # Check for ViT patterns
+    for key in vit_keys:
+        if any(key in k for k in state_keys):
+            return 'vit_b16'
+
+    # Default to EfficientNet
+    return 'efficientnet_b0'
+
+
 def load_model_from_checkpoint(
     model_type: str,
     checkpoint_path: str,
@@ -158,28 +193,47 @@ def load_model_from_checkpoint(
     # Load checkpoint
     checkpoint = load_checkpoint(checkpoint_path)
 
+    # Use config from checkpoint if available, otherwise use provided config
+    ckpt_config = checkpoint.get('config', {})
+    if ckpt_config:
+        print(f"Using config from checkpoint (num_classes: {ckpt_config.get('model', {}).get('num_classes', 'N/A')})")
+        model_config = ckpt_config.get('model', config.get('model', {}))
+    else:
+        model_config = config.get('model', {})
+
     # Initialize model based on type
     if model_type == 'classifier':
+        # Detect actual backbone from state_dict (config may be incorrect)
+        detected_backbone = detect_backbone_from_state_dict(checkpoint['model_state_dict'])
+        config_backbone = model_config.get('backbone', 'efficientnet_b0')
+
+        if detected_backbone != config_backbone:
+            print(f"WARNING: Config says backbone='{config_backbone}' but state_dict shows '{detected_backbone}'")
+            print(f"Using detected backbone: {detected_backbone}")
+
         model = FoodClassifier(
-            num_classes=config.get('model', {}).get('num_classes', 132),
-            backbone=config.get('model', {}).get('backbone', 'efficientnet_b0'),
+            num_classes=model_config.get('num_classes', 132),
+            backbone=detected_backbone,  # Use detected backbone instead of config
             pretrained=False
         )
     elif model_type == 'segmentation':
         model = FoodSegmentation(
-            num_classes=config.get('model', {}).get('num_classes', 132),
+            num_classes=model_config.get('num_classes', 132),
             pretrained=False
         )
     elif model_type == 'regression':
+        # CalorieRegressor takes visual features as input, needs input_dim
         model = CalorieRegressor(
-            backbone=config.get('model', {}).get('backbone', 'efficientnet_b0'),
-            pretrained=False
+            input_dim=model_config.get('input_dim', 1280),
+            hidden_dims=model_config.get('hidden_dims', [512, 256, 128]),
+            output_dim=model_config.get('output_dim', 5),
+            dropout=model_config.get('dropout', 0.3)
         )
     elif model_type == 'end_to_end':
         model = EndToEndFoodRecognition(
-            num_classes=config.get('model', {}).get('num_classes', 132),
-            classifier_backbone=config.get('model', {}).get('classifier_backbone', 'efficientnet_b0'),
-            regression_backbone=config.get('model', {}).get('regression_backbone', 'efficientnet_b0')
+            num_classes=model_config.get('num_classes', 132),
+            classifier_backbone=model_config.get('classifier_backbone', 'efficientnet_b0'),
+            regression_backbone=model_config.get('regression_backbone', 'efficientnet_b0')
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -220,7 +274,7 @@ def evaluate_classifier(
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
             images = batch['image'].to(device)
-            targets = batch['dish_id'].to(device)
+            targets = batch['label'].to(device)
 
             # Forward pass
             outputs = model(images)
@@ -274,9 +328,7 @@ def evaluate_segmentation(
     device: torch.device
 ) -> Dict[str, Any]:
     """
-    Evaluate segmentation model.
-
-    Note: Full mAP computation requires complex IoU matching. This provides simplified metrics.
+    Evaluate segmentation model with proper mAP metrics using torchmetrics.
 
     Args:
         model: Segmentation model
@@ -287,24 +339,37 @@ def evaluate_segmentation(
         Dictionary of evaluation metrics
     """
     print("\nEvaluating segmentation model...")
-    warnings.warn(
-        "Simplified segmentation metrics. Full mAP computation would require "
-        "proper IoU-based matching of predicted and ground-truth boxes/masks."
-    )
+
+    # Try to use torchmetrics for proper mAP
+    try:
+        from torchmetrics.detection.mean_ap import MeanAveragePrecision
+        use_torchmetrics = True
+        map_metric = MeanAveragePrecision(iou_type="bbox", class_metrics=False)
+        print("Using torchmetrics for mAP computation")
+    except ImportError:
+        use_torchmetrics = False
+        warnings.warn(
+            "torchmetrics not available. Using simplified metrics. "
+            "Install with: pip install torchmetrics"
+        )
 
     all_predictions = []
+    all_preds_torchmetrics = []
+    all_targets_torchmetrics = []
     total_detections = 0
     total_gt_boxes = 0
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
-            images = batch['image'].to(device)
+            # batch is a list of sample dicts from our collate_fn
+            images = [sample['image'].to(device) for sample in batch]
+            targets = [sample.get('target') for sample in batch]
 
-            # Forward pass
+            # Forward pass - segmentation model expects list of images
             outputs = model(images)
 
-            # Count detections
-            for output in outputs:
+            # Process each prediction
+            for i, output in enumerate(outputs):
                 num_detections = len(output['boxes'])
                 total_detections += num_detections
                 all_predictions.append({
@@ -313,42 +378,162 @@ def evaluate_segmentation(
                     'labels': output['labels'].cpu().numpy().tolist() if num_detections > 0 else []
                 })
 
-            # Count ground truth boxes (if available)
-            if 'boxes' in batch:
-                for boxes in batch['boxes']:
-                    total_gt_boxes += len(boxes)
+                # Prepare for torchmetrics if available
+                if use_torchmetrics and num_detections > 0:
+                    pred_dict = {
+                        'boxes': output['boxes'].cpu(),
+                        'scores': output['scores'].cpu(),
+                        'labels': output['labels'].cpu()
+                    }
+                    all_preds_torchmetrics.append(pred_dict)
 
-    # Compute simplified metrics
-    avg_detections_per_image = total_detections / len(dataloader.dataset)
+                    # Get corresponding target
+                    target = targets[i]
+                    if target is not None and 'boxes' in target:
+                        target_dict = {
+                            'boxes': target['boxes'].cpu() if isinstance(target['boxes'], torch.Tensor) else torch.tensor(target['boxes']),
+                            'labels': target['labels'].cpu() if isinstance(target['labels'], torch.Tensor) else torch.tensor(target['labels'])
+                        }
+                        all_targets_torchmetrics.append(target_dict)
+                    else:
+                        # No ground truth - create empty target
+                        all_targets_torchmetrics.append({
+                            'boxes': torch.zeros((0, 4)),
+                            'labels': torch.zeros((0,), dtype=torch.long)
+                        })
+                elif use_torchmetrics and num_detections == 0:
+                    # Empty prediction
+                    all_preds_torchmetrics.append({
+                        'boxes': torch.zeros((0, 4)),
+                        'scores': torch.zeros((0,)),
+                        'labels': torch.zeros((0,), dtype=torch.long)
+                    })
+                    target = targets[i]
+                    if target is not None and 'boxes' in target:
+                        target_dict = {
+                            'boxes': target['boxes'].cpu() if isinstance(target['boxes'], torch.Tensor) else torch.tensor(target['boxes']),
+                            'labels': target['labels'].cpu() if isinstance(target['labels'], torch.Tensor) else torch.tensor(target['labels'])
+                        }
+                        all_targets_torchmetrics.append(target_dict)
+                    else:
+                        all_targets_torchmetrics.append({
+                            'boxes': torch.zeros((0, 4)),
+                            'labels': torch.zeros((0,), dtype=torch.long)
+                        })
+
+            # Count ground truth boxes (if available)
+            for target in targets:
+                if target is not None and 'boxes' in target:
+                    total_gt_boxes += len(target['boxes'])
+
+    # Compute metrics
+    avg_detections_per_image = total_detections / len(dataloader.dataset) if len(dataloader.dataset) > 0 else 0
 
     metrics = {
         'total_detections': total_detections,
         'total_gt_boxes': total_gt_boxes,
         'avg_detections_per_image': float(avg_detections_per_image),
-        'num_samples': len(dataloader.dataset),
-        'note': 'Simplified metrics. Full mAP computation requires IoU-based matching.'
+        'num_samples': len(dataloader.dataset)
     }
 
+    # Compute mAP using torchmetrics if available
+    if use_torchmetrics and len(all_preds_torchmetrics) > 0 and len(all_targets_torchmetrics) > 0:
+        try:
+            map_metric.update(all_preds_torchmetrics, all_targets_torchmetrics)
+            map_results = map_metric.compute()
+
+            metrics['mAP'] = float(map_results['map'].item()) if not torch.isnan(map_results['map']) else 0.0
+            metrics['mAP_50'] = float(map_results['map_50'].item()) if not torch.isnan(map_results['map_50']) else 0.0
+            metrics['mAP_75'] = float(map_results['map_75'].item()) if not torch.isnan(map_results['map_75']) else 0.0
+            metrics['mar_1'] = float(map_results['mar_1'].item()) if not torch.isnan(map_results['mar_1']) else 0.0
+            metrics['mar_10'] = float(map_results['mar_10'].item()) if not torch.isnan(map_results['mar_10']) else 0.0
+            metrics['mar_100'] = float(map_results['mar_100'].item()) if not torch.isnan(map_results['mar_100']) else 0.0
+
+            print(f"\nmAP Results:")
+            print(f"  mAP@[0.5:0.95]: {metrics['mAP']:.4f}")
+            print(f"  mAP@0.5:        {metrics['mAP_50']:.4f}")
+            print(f"  mAP@0.75:       {metrics['mAP_75']:.4f}")
+            print(f"  mAR@1:          {metrics['mar_1']:.4f}")
+            print(f"  mAR@10:         {metrics['mar_10']:.4f}")
+            print(f"  mAR@100:        {metrics['mar_100']:.4f}")
+        except Exception as e:
+            print(f"Warning: Failed to compute mAP: {e}")
+            metrics['note'] = f'mAP computation failed: {str(e)}'
+    else:
+        metrics['note'] = 'Simplified metrics only. No ground truth boxes available or torchmetrics not installed.'
+
     return metrics, {'predictions': all_predictions}
+
+
+def compute_target_normalization_stats(dataloader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute mean and std for target normalization from dataloader.
+
+    Args:
+        dataloader: DataLoader to compute stats from
+
+    Returns:
+        Tuple of (mean, std) tensors with shape (5,) for [calories, protein, carb, fat, mass]
+    """
+    all_targets = []
+
+    for batch in tqdm(dataloader, desc="Computing normalization stats"):
+        targets = torch.stack([
+            batch['calories'],
+            batch['protein_g'],
+            batch['carb_g'],
+            batch['fat_g'],
+            batch['mass_g']
+        ], dim=1)
+        all_targets.append(targets)
+
+    all_targets = torch.cat(all_targets, dim=0)
+    mean = all_targets.mean(dim=0)
+    std = all_targets.std(dim=0)
+
+    # Prevent division by zero
+    std = torch.where(std < 1e-8, torch.ones_like(std), std)
+
+    return mean, std
 
 
 def evaluate_regression(
     model: nn.Module,
     dataloader: DataLoader,
-    device: torch.device
+    device: torch.device,
+    feature_extractor: nn.Module = None,
+    train_dataloader: DataLoader = None
 ) -> Dict[str, Any]:
     """
     Evaluate regression model.
 
     Args:
-        model: Regression model
+        model: Regression model (CalorieRegressor)
         dataloader: DataLoader for evaluation
         device: Device to run evaluation on
+        feature_extractor: Feature extractor model (FoodClassifier)
+        train_dataloader: Training DataLoader for computing normalization stats
 
     Returns:
         Dictionary of evaluation metrics
     """
     print("\nEvaluating regression model...")
+
+    # Compute normalization stats from training data if provided
+    if train_dataloader is not None:
+        print("Computing normalization statistics from training data...")
+        mean, std = compute_target_normalization_stats(train_dataloader)
+        mean = mean.to(device)
+        std = std.to(device)
+        print(f"  Mean: {mean.cpu().numpy()}")
+        print(f"  Std:  {std.cpu().numpy()}")
+    else:
+        # Use hardcoded stats from training (Nutrition5k dataset)
+        mean = torch.tensor([216.07, 14.88, 17.38, 10.72, 188.96], device=device)
+        std = torch.tensor([260.04, 18.71, 29.14, 18.65, 267.88], device=device)
+        print("Using pre-computed normalization statistics:")
+        print(f"  Mean: {mean.cpu().numpy()}")
+        print(f"  Std:  {std.cpu().numpy()}")
 
     all_predictions = []
     all_targets = []
@@ -359,15 +544,23 @@ def evaluate_regression(
 
             # Get targets (calories, protein, carb, fat, mass)
             targets = torch.stack([
-                batch['total_calories'],
-                batch['total_protein'],
-                batch['total_carb'],
-                batch['total_fat'],
-                batch['total_mass']
+                batch['calories'],
+                batch['protein_g'],
+                batch['carb_g'],
+                batch['fat_g'],
+                batch['mass_g']
             ], dim=1).to(device)
 
-            # Forward pass
-            outputs = model(images)
+            # Extract features first if feature_extractor provided
+            if feature_extractor is not None:
+                features = feature_extractor.extract_features(images)
+                outputs = model(features)
+            else:
+                # Model takes images directly
+                outputs = model(images)
+
+            # Denormalize model outputs (model predicts in normalized space)
+            outputs = outputs * std + mean
 
             # Store results
             all_predictions.append(outputs.cpu())
@@ -563,7 +756,19 @@ def print_evaluation_report(metrics: Dict[str, Any], model_type: str) -> None:
         print(f"  Avg Detections per Image:   {metrics['avg_detections_per_image']:.2f}")
         if 'total_gt_boxes' in metrics:
             print(f"  Total GT Boxes:             {metrics['total_gt_boxes']}")
-        print(f"\n  Note: {metrics['note']}")
+
+        # Print mAP metrics if available
+        if 'mAP' in metrics:
+            print("\n  mAP Metrics (torchmetrics):")
+            print(f"    mAP@[0.5:0.95]: {metrics['mAP']:.4f}")
+            print(f"    mAP@0.5:        {metrics['mAP_50']:.4f}")
+            print(f"    mAP@0.75:       {metrics['mAP_75']:.4f}")
+            print(f"    mAR@1:          {metrics['mar_1']:.4f}")
+            print(f"    mAR@10:         {metrics['mar_10']:.4f}")
+            print(f"    mAR@100:        {metrics['mar_100']:.4f}")
+
+        if 'note' in metrics:
+            print(f"\n  Note: {metrics['note']}")
 
     elif model_type == 'regression':
         print("Regression Metrics:")
@@ -676,14 +881,20 @@ def main():
     }
     mode = mode_mapping[args.model]
 
-    # Create dataset and dataloader
+    # Create dataset and dataloader using get_datasets to ensure consistent class mapping
     print(f"\nLoading {args.split} dataset in {mode} mode...")
-    dataset = Nutrition5kDataset(
-        root_dir=config.get('data', {}).get('dataset_root', 'data/nutrition5k'),
-        split=args.split,
-        mode=mode,
-        transform=None  # Use default transforms
+    train_dataset, val_dataset, test_dataset = get_datasets(
+        root=config.get('data', {}).get('dataset_root', 'data/nutrition5k'),
+        task=mode
     )
+
+    # Select the appropriate split
+    if args.split == 'train':
+        dataset = train_dataset
+    elif args.split == 'val':
+        dataset = val_dataset
+    else:
+        dataset = test_dataset
 
     # Create dataloader with appropriate collate function
     custom_collate = collate_fn if mode in ['segmentation', 'end_to_end'] else None
@@ -712,7 +923,15 @@ def main():
     elif args.model == 'segmentation':
         metrics, predictions = evaluate_segmentation(model, dataloader, device)
     elif args.model == 'regression':
-        metrics, predictions = evaluate_regression(model, dataloader, device)
+        # Regression needs a feature extractor
+        feature_extractor = FoodClassifier(
+            num_classes=config.get('model', {}).get('num_classes', 132),
+            backbone=config.get('model', {}).get('backbone', 'efficientnet_b0'),
+            pretrained=True  # Use pretrained for feature extraction
+        )
+        feature_extractor = feature_extractor.to(device)
+        feature_extractor.eval()
+        metrics, predictions = evaluate_regression(model, dataloader, device, feature_extractor)
     elif args.model == 'end_to_end':
         metrics, predictions = evaluate_end_to_end(model, dataloader, device)
 

@@ -118,10 +118,21 @@ QUICK_START.md
 CLAUDE.md
 project proposal.txt
 
-# Temporary download and verification scripts (exclude from GitHub)
+# Auxiliary scripts (exclude from GitHub)
 scripts/download_gcs_direct.py
 scripts/verify_data.py
 scripts/verify_kaggle_metadata_match.py
 scripts/download_*.py
 scripts/verify_*.py
+scripts/dataset_stats.py
+scripts/estimate_resources.py
 download_simple.py
+
+# Documentation (exclude from GitHub)
+README.md
+requirements.txt
+qa/report.md
+nul
+
+# Improved/experimental configs (optional - remove if you want to keep)
+configs/*_improved.yaml

@@ -275,6 +275,13 @@ def main():
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nUsing device: {device}")
 
+    # Limit GPU memory usage to 75%
+    if device.type == 'cuda':
+        gpu_memory_fraction = config.get('training', {}).get('gpu_memory_fraction', 0.75)
+        device_index = device.index if device.index is not None else 0
+        torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction, device_index)
+        print(f"GPU memory limited to: {gpu_memory_fraction * 100:.0f}%")
+
     # Create data loaders
     train_loader, val_loader = create_data_loaders(config, args.debug)
 

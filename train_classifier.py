@@ -274,6 +274,13 @@ def main():
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nUsing device: {device}")
 
+    # Limit GPU memory usage
+    if device.type == 'cuda':
+        gpu_memory_fraction = config.get('training', {}).get('gpu_memory_fraction', 0.75)
+        device_index = device.index if device.index is not None else 0
+        torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction, device_index)
+        print(f"GPU memory limited to: {gpu_memory_fraction * 100:.0f}%")
+
     # Create data loaders
     train_loader, val_loader = create_data_loaders(config, args.debug)
 
@@ -283,9 +290,11 @@ def main():
     print("="*80)
 
     model = FoodClassifier(
+        backbone=config['model'].get('backbone', 'efficientnet_b0'),
         num_classes=config['model']['num_classes'],
-        model_name=config['model']['name'],
-        pretrained=config['model']['pretrained']
+        pretrained=config['model']['pretrained'],
+        freeze_backbone=config['model'].get('freeze_backbone', False),
+        dropout=config['model'].get('dropout', 0.3)
     )
     model = model.to(device)
 
@@ -342,8 +351,11 @@ def main():
             )
         print(f"Scheduler: {scheduler_name}")
 
-    # Setup logger
-    exp_name = f"{config['model']['name']}_classification"
+    # Setup logger - use experiment name from config or fallback to model+backbone
+    exp_name = config['experiment'].get('name', None)
+    if not exp_name:
+        backbone_name = config['model'].get('backbone', 'unknown')
+        exp_name = f"{config['model']['name']}_{backbone_name}_classification"
     if args.debug:
         exp_name += "_debug"
 

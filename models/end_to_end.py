@@ -101,16 +101,20 @@ class EndToEndFoodRecognition(nn.Module):
 
         # Initialize regressor
         reg_config = regressor_config or {}
+        # Filter to valid regressor parameters
+        valid_reg_params = {'hidden_dims', 'output_dim', 'dropout', 'fusion_method'}
+        filtered_reg_config = {k: v for k, v in reg_config.items() if k in valid_reg_params}
+
         if use_geometric_features:
             self.regressor = CalorieRegressorWithGeometric(
                 visual_dim=feature_dim,
                 geometric_dim=5,  # area, width, height, aspect_ratio, volume_proxy
-                **reg_config
+                **filtered_reg_config
             )
         else:
             self.regressor = CalorieRegressor(
                 input_dim=feature_dim,
-                **reg_config
+                **filtered_reg_config
             )
 
         # Define image normalization
@@ -183,23 +187,27 @@ class EndToEndFoodRecognition(nn.Module):
                     image, box, mask
                 )
 
+                # FIX: Normalize instance features before classification/regression
+                # This matches training_forward which normalizes at line ~283
+                instance_features_norm = self.normalize(instance_features)
+
                 # Classification
                 with torch.no_grad():
-                    class_logits = self.classifier(instance_features.unsqueeze(0))
+                    class_logits = self.classifier(instance_features_norm.unsqueeze(0))
                     class_probs = torch.softmax(class_logits, dim=1)
                     category_idx = class_probs.argmax(dim=1).item()
                     category_prob = class_probs[0, category_idx].item()
 
-                # Regression
+                # Regression (use normalized features to match training)
                 if self.use_geometric_features:
                     geometric_feats = self._extract_geometric_features(box, mask)
                     visual_feats = self.classifier.extract_features(
-                        instance_features.unsqueeze(0)
+                        instance_features_norm.unsqueeze(0)
                     )
                     nutrition = self.regressor(visual_feats, geometric_feats)
                 else:
                     visual_feats = self.classifier.extract_features(
-                        instance_features.unsqueeze(0)
+                        instance_features_norm.unsqueeze(0)
                     )
                     nutrition = self.regressor(visual_feats)
 
@@ -237,6 +245,122 @@ class EndToEndFoodRecognition(nn.Module):
             })
 
         return results
+
+    def training_forward(
+        self,
+        images: List[torch.Tensor],
+        targets: List[Dict[str, torch.Tensor]],
+        labels: torch.Tensor,
+        nutrition: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Training forward pass with ground truth.
+
+        FIXED: Uses detected instances instead of GT boxes for classification/regression.
+        This makes training consistent with inference:
+        1. Mask R-CNN detects instances
+        2. Each instance predicts per-instance nutrition
+        3. Sum all instance predictions
+        4. Compare with total dish nutrition (the label)
+
+        Args:
+            images: List of image tensors [C, H, W]
+            targets: List of target dicts for Mask R-CNN
+            labels: Classification labels [batch_size]
+            nutrition: Nutrition targets [batch_size, 5] - TOTAL dish nutrition
+
+        Returns:
+            Dict with losses:
+                - segmentation_loss: Mask R-CNN loss
+                - classification_loss: Classification CE loss
+                - regression_loss: Regression MSE loss (sum of instances vs total)
+                - class_logits: Raw classification outputs (from top-1 instance per image)
+        """
+        batch_size = len(images)
+        device = images[0].device
+
+        # Step 1: Segmentation loss (Mask R-CNN in training mode)
+        self.segmentation.train()
+        seg_loss_dict = self.segmentation(images, targets)
+        segmentation_loss = sum(loss for loss in seg_loss_dict.values())
+
+        # Step 2: Run Mask R-CNN in eval mode to get detected instances
+        # This is the key fix - use detected instances, not GT boxes
+        self.segmentation.eval()
+        with torch.no_grad():
+            detections = self.segmentation(images)
+
+        # Step 3: Process each image - sum instance predictions, compare with total nutrition
+        all_class_logits = []
+        all_nutrition_predictions = []
+
+        for img_idx, (image, detection) in enumerate(zip(images, detections)):
+            # Filter detections by score (use lower threshold during training)
+            keep = detection['scores'] > 0.1  # Lower threshold to get more instances
+            boxes = detection['boxes'][keep]
+            masks = detection['masks'][keep]
+            scores = detection['scores'][keep]
+
+            if len(boxes) == 0:
+                # Fallback to GT box if no detection (ensures gradient flow)
+                boxes = targets[img_idx]['boxes'][:1]
+                masks = targets[img_idx]['masks'][:1]
+                scores = torch.tensor([1.0], device=device)
+
+            # Process all detected instances
+            instance_nutrition_preds = []
+            instance_class_logits = []
+
+            for box, mask, score in zip(boxes, masks, scores):
+                # Extract instance region
+                instance_features = self._extract_instance_features(image, box, mask)
+                instance_features_norm = self.normalize(instance_features)
+
+                # Classification (get logits for loss)
+                class_logits = self.classifier(instance_features_norm.unsqueeze(0))
+                instance_class_logits.append(class_logits)
+
+                # Regression (predict per-instance nutrition)
+                visual_features = self.classifier.extract_features(instance_features_norm.unsqueeze(0))
+
+                if self.use_geometric_features:
+                    geometric_feats = self._extract_geometric_features(box, mask)
+                    nutrition_pred = self.regressor(visual_features, geometric_feats)
+                else:
+                    nutrition_pred = self.regressor(visual_features)
+
+                instance_nutrition_preds.append(nutrition_pred)
+
+            # Sum all instance predictions for this image (matches inference aggregation)
+            if len(instance_nutrition_preds) > 0:
+                stacked_preds = torch.cat(instance_nutrition_preds, dim=0)  # [num_instances, 5]
+                total_pred = stacked_preds.sum(dim=0, keepdim=True)  # [1, 5]
+            else:
+                total_pred = torch.zeros(1, 5, device=device)
+
+            all_nutrition_predictions.append(total_pred)
+
+            # Use top-1 instance class logits for classification loss
+            if len(instance_class_logits) > 0:
+                all_class_logits.append(instance_class_logits[0])  # Top confidence instance
+            else:
+                # Fallback: zero logits
+                all_class_logits.append(torch.zeros(1, self.num_classes, device=device))
+
+        # Stack predictions
+        class_logits = torch.cat(all_class_logits, dim=0)  # [batch_size, num_classes]
+        nutrition_predictions = torch.cat(all_nutrition_predictions, dim=0)  # [batch_size, 5]
+
+        # Compute losses
+        classification_loss = nn.CrossEntropyLoss()(class_logits, labels)
+        regression_loss = nn.MSELoss()(nutrition_predictions, nutrition)
+
+        return {
+            'segmentation_loss': segmentation_loss,
+            'classification_loss': classification_loss,
+            'regression_loss': regression_loss,
+            'class_logits': class_logits,
+        }
 
     def _extract_instance_features(
         self,

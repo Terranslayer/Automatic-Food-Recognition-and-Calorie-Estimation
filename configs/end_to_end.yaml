@@ -14,7 +14,7 @@ experiment:
 # Model configuration
 model:
   name: EndToEndFoodRecognition
-  num_classes: 91
+  num_classes: 155  # 154 food classes + 1 background
 
   # Segmentation component (Mask R-CNN)
   segmentation_config:
@@ -46,16 +46,21 @@ model:
 # Data configuration
 data:
   image_size: [800, 800]  # For segmentation component
-  batch_size: 2  # End-to-end model requires significant memory
 
   # Multi-task data settings
   mode: end_to_end  # Dataset returns all annotations
 
 # Training overrides
 training:
+  batch_size: 4  # With AMP enabled, can use batch_size=4
   num_epochs: 50
   early_stopping_patience: 10
-  gradient_accumulation_steps: 8  # Effective batch size = 16
+  gradient_accumulation_steps: 4  # Effective batch size = 16
+  use_amp: true  # Mixed precision training for memory efficiency
+
+  # Stability settings (prevent NaN/gradient explosion)
+  regression_loss_scale: 0.001  # Scale down large MSE loss (raw ~40000 -> ~40)
+  max_grad_norm: 1.0  # Gradient clipping threshold
 
   # Multi-stage training strategy
   training_strategy: joint  # Options: joint, sequential

@@ -36,6 +36,7 @@ class Nutrition5kDataset(Dataset):
         transform: Optional image transformations
         subset_size: If specified, use only first N samples (for debugging)
         image_size: Target image size (height, width)
+        global_classes: Optional list of class names (for consistent indices across splits)
     """
 
     def __init__(
@@ -46,6 +47,7 @@ class Nutrition5kDataset(Dataset):
         transform: Optional[Any] = None,
         subset_size: Optional[int] = None,
         image_size: Tuple[int, int] = (224, 224),
+        global_classes: Optional[List[str]] = None,
     ):
         super().__init__()
 
@@ -67,8 +69,11 @@ class Nutrition5kDataset(Dataset):
         if subset_size is not None:
             self.metadata = self.metadata[:subset_size]
 
-        # Build class mapping
-        self.classes = self._build_class_mapping()
+        # Build class mapping - use global classes if provided for consistent indices
+        if global_classes is not None:
+            self.classes = global_classes
+        else:
+            self.classes = self._build_class_mapping()
         self.num_classes = len(self.classes)
 
         print(f"Loaded {split} split: {len(self.metadata)} samples, "
@@ -83,13 +88,21 @@ class Nutrition5kDataset(Dataset):
         """
         metadata_dir = self.root_dir / "metadata"
 
-        # Try to find metadata CSV/JSON files
-        # Nutrition5k typically has dish_metadata_cafe*.csv files
-        metadata_files = list(metadata_dir.glob("dish_metadata*.csv"))
+        # Priority 1: Try dish_metadata_with_labels.csv (contains food categories)
+        labeled_metadata = metadata_dir / "dish_metadata_with_labels.csv"
+        if labeled_metadata.exists():
+            metadata_files = [labeled_metadata]
+        else:
+            # Priority 2: Try dish_metadata_cafe*.csv files
+            metadata_files = list(metadata_dir.glob("dish_metadata_cafe*.csv"))
 
-        if not metadata_files:
-            # Fallback: try to find any CSV files
-            metadata_files = list(metadata_dir.glob("*.csv"))
+            if not metadata_files:
+                # Priority 3: Try dish_metadata*.csv files
+                metadata_files = list(metadata_dir.glob("dish_metadata*.csv"))
+
+            if not metadata_files:
+                # Fallback: try to find any CSV files
+                metadata_files = list(metadata_dir.glob("*.csv"))
 
         if not metadata_files:
             raise FileNotFoundError(
@@ -138,16 +151,23 @@ class Nutrition5kDataset(Dataset):
         # Convert to list of dictionaries
         metadata = []
         for idx, row in combined_df.iterrows():
+            # Get food category - try multiple possible column names
+            food_category = "unknown"
+            for col_name in ["food_category", "food_name", "category", "primary_ingredient"]:
+                if col_name in row and pd.notna(row[col_name]):
+                    food_category = str(row[col_name])
+                    break
+
             item = {
                 "dish_id": row.get("dish_id", f"dish_{idx}"),
                 "image_path": self._get_image_path(row),
                 "calories": float(row.get("total_calories", row.get("calories", 0))),
                 "mass_g": float(row.get("total_mass", row.get("mass", 0))),
-                "food_category": str(row.get("food_name", row.get("category", "unknown"))),
-                # Additional fields
-                "protein_g": float(row.get("total_protein", 0)),
-                "carb_g": float(row.get("total_carb", 0)),
-                "fat_g": float(row.get("total_fat", 0)),
+                "food_category": food_category,
+                # Additional fields - try multiple column names
+                "protein_g": float(row.get("total_protein", row.get("protein", 0))),
+                "carb_g": float(row.get("total_carb", row.get("carb", 0))),
+                "fat_g": float(row.get("total_fat", row.get("fat", 0))),
             }
 
             # Only add if image exists
@@ -309,30 +329,104 @@ class Nutrition5kDataset(Dataset):
             }
 
         elif self.mode == "segmentation":
-            # For segmentation, we would need mask annotations
-            # This is a placeholder - actual implementation depends on
-            # availability of segmentation masks in Nutrition5k
+            # For segmentation with Mask R-CNN
+            # Since Nutrition5k doesn't have per-pixel masks, we create a
+            # pseudo-mask covering the entire image (single food item per image)
+            label_idx = self._get_class_index(item["food_category"])
+
+            # Create pseudo bounding box (full image) and mask
+            # Image is already a tensor after transform: [C, H, W]
+            _, h, w = image.shape
+
+            # Single box covering most of image (with small margin)
+            margin = 0.05
+            boxes = torch.tensor([[
+                w * margin,      # x1
+                h * margin,      # y1
+                w * (1-margin),  # x2
+                h * (1-margin)   # y2
+            ]], dtype=torch.float32)
+
+            # Labels for each box (1-indexed for Mask R-CNN, 0 is background)
+            labels = torch.tensor([label_idx + 1], dtype=torch.int64)
+
+            # Pseudo mask: elliptical mask centered in image
+            masks = torch.zeros((1, h, w), dtype=torch.uint8)
+            center_y, center_x = h // 2, w // 2
+            y_coords, x_coords = torch.meshgrid(
+                torch.arange(h), torch.arange(w), indexing='ij'
+            )
+            # Elliptical mask
+            ellipse = ((x_coords - center_x) / (w * 0.4))**2 + \
+                      ((y_coords - center_y) / (h * 0.4))**2
+            masks[0] = (ellipse <= 1).to(torch.uint8)
+
+            # Target dict for Mask R-CNN
+            target = {
+                "boxes": boxes,
+                "labels": labels,
+                "masks": masks,
+                "image_id": torch.tensor([hash(item["dish_id"]) % (2**31)]),
+                "area": (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]),
+                "iscrowd": torch.zeros((1,), dtype=torch.int64),
+            }
+
             return {
                 "image": image,
-                "label": self._get_class_index(item["food_category"]),
+                "target": target,
                 "category": item["food_category"],
                 "dish_id": item["dish_id"],
-                # TODO: Add masks when available
-                # "masks": ...,
-                # "boxes": ...,
             }
 
         elif self.mode == "end_to_end":
-            # Combined mode: all information
+            # Combined mode: segmentation + classification + regression
+            label_idx = self._get_class_index(item["food_category"])
+
+            # Create pseudo bounding box and mask (same as segmentation mode)
+            _, h, w = image.shape
+            margin = 0.05
+            boxes = torch.tensor([[
+                w * margin, h * margin,
+                w * (1-margin), h * (1-margin)
+            ]], dtype=torch.float32)
+
+            labels = torch.tensor([label_idx + 1], dtype=torch.int64)
+
+            # Pseudo elliptical mask
+            masks = torch.zeros((1, h, w), dtype=torch.uint8)
+            center_y, center_x = h // 2, w // 2
+            y_coords, x_coords = torch.meshgrid(
+                torch.arange(h), torch.arange(w), indexing='ij'
+            )
+            ellipse = ((x_coords - center_x) / (w * 0.4))**2 + \
+                      ((y_coords - center_y) / (h * 0.4))**2
+            masks[0] = (ellipse <= 1).to(torch.uint8)
+
+            # Target dict for Mask R-CNN
+            target = {
+                "boxes": boxes,
+                "labels": labels,
+                "masks": masks,
+                "image_id": torch.tensor([hash(item["dish_id"]) % (2**31)]),
+                "area": (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]),
+                "iscrowd": torch.zeros((1,), dtype=torch.int64),
+            }
+
+            # Stacked nutrition tensor for regression
+            nutrition = torch.tensor([
+                item["calories"],
+                item["protein_g"],
+                item["carb_g"],
+                item["fat_g"],
+                item["mass_g"]
+            ], dtype=torch.float32)
+
             return {
                 "image": image,
-                "label": self._get_class_index(item["food_category"]),
+                "target": target,
+                "label": torch.tensor(label_idx, dtype=torch.long),
+                "nutrition": nutrition,
                 "category": item["food_category"],
-                "calories": torch.tensor(item["calories"], dtype=torch.float32),
-                "mass_g": torch.tensor(item["mass_g"], dtype=torch.float32),
-                "protein_g": torch.tensor(item["protein_g"], dtype=torch.float32),
-                "carb_g": torch.tensor(item["carb_g"], dtype=torch.float32),
-                "fat_g": torch.tensor(item["fat_g"], dtype=torch.float32),
                 "dish_id": item["dish_id"],
             }
 
@@ -401,6 +495,69 @@ def get_default_transforms(split: str, image_size: Tuple[int, int] = (224, 224))
         ])
 
 
+def get_segmentation_transforms(split: str, image_size: Tuple[int, int] = (224, 224)):
+    """
+    Get transforms for segmentation tasks (no normalization - Mask R-CNN handles it).
+
+    Args:
+        split: 'train', 'val', or 'test'
+        image_size: Target image size
+
+    Returns:
+        torchvision transforms composition
+    """
+    if split == "train":
+        return T.Compose([
+            T.Resize(image_size),
+            T.RandomHorizontalFlip(p=0.5),
+            T.ToTensor(),  # Just convert to tensor, no normalization
+        ])
+    else:
+        return T.Compose([
+            T.Resize(image_size),
+            T.ToTensor(),
+        ])
+
+
+def _get_global_classes(root: str) -> List[str]:
+    """
+    Build a global class list from ALL splits to ensure consistent label indices.
+
+    This is critical for training - without consistent indices, 'beef' might be
+    class 11 in train but class 8 in val, causing all predictions to be wrong.
+
+    Args:
+        root: Path to nutrition5k dataset root
+
+    Returns:
+        Sorted list of all unique food categories across all splits
+    """
+    root_path = Path(root)
+    metadata_dir = root_path / "metadata"
+
+    # Load the labeled metadata file (contains all samples)
+    labeled_metadata = metadata_dir / "dish_metadata_with_labels.csv"
+    if labeled_metadata.exists():
+        df = pd.read_csv(labeled_metadata)
+    else:
+        # Fallback to other metadata files
+        metadata_files = list(metadata_dir.glob("dish_metadata*.csv"))
+        if metadata_files:
+            df = pd.concat([pd.read_csv(f) for f in metadata_files], ignore_index=True)
+        else:
+            raise FileNotFoundError(f"No metadata files found in {metadata_dir}")
+
+    # Extract all unique food categories
+    all_categories = set()
+    for col_name in ["food_category", "food_name", "category", "primary_ingredient"]:
+        if col_name in df.columns:
+            categories = df[col_name].dropna().astype(str).unique()
+            all_categories.update(categories)
+            break
+
+    return sorted(list(all_categories))
+
+
 def get_datasets(root: str, task: str = 'classification', image_size: Tuple[int, int] = (224, 224)):
     """
     Create train, val, and test datasets for different tasks.
@@ -413,31 +570,43 @@ def get_datasets(root: str, task: str = 'classification', image_size: Tuple[int,
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
     """
-    # Get transforms
-    train_transforms = get_default_transforms('train', image_size)
-    val_transforms = get_default_transforms('val', image_size)
-    test_transforms = get_default_transforms('test', image_size)
+    # Get transforms based on task
+    if task in ('segmentation', 'end_to_end'):
+        # Segmentation/end-to-end uses special transforms (no normalization)
+        train_transforms = get_segmentation_transforms('train', image_size)
+        val_transforms = get_segmentation_transforms('val', image_size)
+        test_transforms = get_segmentation_transforms('test', image_size)
+    else:
+        train_transforms = get_default_transforms('train', image_size)
+        val_transforms = get_default_transforms('val', image_size)
+        test_transforms = get_default_transforms('test', image_size)
 
-    # Create datasets based on task
+    # Build global class mapping FIRST to ensure consistent indices across all splits
+    global_classes = _get_global_classes(root)
+
+    # Create datasets with shared class mapping
     train_dataset = Nutrition5kDataset(
         root_dir=root,
         split='train',
         mode=task,
-        transform=train_transforms
+        transform=train_transforms,
+        global_classes=global_classes
     )
 
     val_dataset = Nutrition5kDataset(
         root_dir=root,
         split='val',
         mode=task,
-        transform=val_transforms
+        transform=val_transforms,
+        global_classes=global_classes
     )
 
     test_dataset = Nutrition5kDataset(
         root_dir=root,
         split='test',
         mode=task,
-        transform=test_transforms
+        transform=test_transforms,
+        global_classes=global_classes
     )
 
     return train_dataset, val_dataset, test_dataset

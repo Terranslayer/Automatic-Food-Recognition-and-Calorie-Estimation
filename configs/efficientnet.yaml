@@ -14,7 +14,7 @@ experiment:
 model:
   name: FoodClassifier
   backbone: efficientnet_b0  # Options: efficientnet_b0, efficientnet_b4
-  num_classes: 91  # Nutrition5k has 90 food classes + background
+  num_classes: 154  # Nutrition5k has 154 unique food ingredient classes (global)
   pretrained: true  # Use ImageNet pretrained weights
   freeze_backbone: false  # Fine-tune entire model
   dropout: 0.3
@@ -28,6 +28,8 @@ data:
 training:
   num_epochs: 100
   early_stopping_patience: 15
+  gpu_memory_fraction: 0.75  # Limit GPU memory to 75%
+  batch_size: 48  # Reduced for 75% GPU memory limit
 
 # Optimizer overrides
 optimizer:

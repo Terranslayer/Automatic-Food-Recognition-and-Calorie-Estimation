@@ -162,7 +162,8 @@ class TestDatasetOutput:
 
         assert "image" in sample
         assert "label" in sample
-        assert "calories" in sample
+        assert "nutrition" in sample  # Stacked tensor [calories, protein, carb, fat, mass]
+        assert "target" in sample  # Segmentation target dict
         assert "category" in sample
 
     def test_image_shape(self, dataset_path, skip_if_no_dataset):

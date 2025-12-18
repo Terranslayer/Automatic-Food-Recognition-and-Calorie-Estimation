@@ -129,11 +129,11 @@ def load_checkpoint(filepath: str, device: Optional[str] = None) -> Dict[str, An
     if not filepath.exists():
         raise FileNotFoundError(f"Checkpoint not found: {filepath}")
 
-    # Load checkpoint
+    # Load checkpoint (weights_only=False for backward compatibility with numpy arrays)
     if device is not None:
-        checkpoint = torch.load(filepath, map_location=device)
+        checkpoint = torch.load(filepath, map_location=device, weights_only=False)
     else:
-        checkpoint = torch.load(filepath)
+        checkpoint = torch.load(filepath, weights_only=False)
 
     return checkpoint
 
