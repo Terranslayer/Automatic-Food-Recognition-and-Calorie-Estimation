@@ -128,9 +128,7 @@ scripts/dataset_stats.py
 scripts/estimate_resources.py
 download_simple.py
 
-# Documentation (exclude from GitHub)
-README.md
-requirements.txt
+# Internal QA notes (exclude from GitHub)
 qa/report.md
 nul
 

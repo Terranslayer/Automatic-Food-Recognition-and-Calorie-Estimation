@@ -1,0 +1,184 @@
+{
+  "project": "Nutrition5k Food Recognition and Calorie Estimation",
+  "phase": "Phase 5.5 - Final Evaluation Summary",
+  "timestamp": "2025-12-17",
+  "test_samples": 676,
+  "num_classes": 154,
+
+  "classification_results": {
+    "efficientnet_b0": {
+      "model": "EfficientNet-B0",
+      "checkpoint": "experiments/FoodClassifier_classification/checkpoints/best.pth",
+      "top1_accuracy": 64.05,
+      "top5_accuracy": 84.32,
+      "precision": 0.4761,
+      "recall": 0.4703,
+      "f1_score": 0.4473,
+      "params_millions": 5.0,
+      "notes": "Best performing classification model"
+    },
+    "vit_b16": {
+      "model": "ViT-B/16",
+      "checkpoint": "experiments/nutrition5k_vit_b16/checkpoints/best.pth",
+      "top1_accuracy": 42.16,
+      "top5_accuracy": 74.41,
+      "precision": 0.3093,
+      "recall": 0.3114,
+      "f1_score": 0.2875,
+      "params_millions": 86.0,
+      "notes": "Transformer model, lower accuracy likely due to limited training data"
+    }
+  },
+
+  "regression_results": {
+    "direct_regression": {
+      "method": "Direct Regression (EfficientNet-B0 + MLP)",
+      "checkpoint": "experiments/CalorieRegressor_regression/checkpoints/best.pth",
+      "calories_mae": 94.32,
+      "calories_rmse": 500.27,
+      "calories_r2": 0.128,
+      "protein_mae": 6.52,
+      "protein_r2": 0.697,
+      "carb_mae": 8.60,
+      "carb_r2": 0.156,
+      "fat_mae": 7.70,
+      "fat_r2": 0.074,
+      "mass_mae": 57.04,
+      "mass_r2": 0.127,
+      "notes": "Best performing method for calorie estimation via evaluate.py"
+    }
+  },
+
+  "calorie_estimation_comparison": {
+    "direct_regression": {
+      "method": "Direct Regression (EfficientNet + MLP)",
+      "calories_mae": 94.32,
+      "mass_mae": 57.04,
+      "calories_r2": 0.128,
+      "notes": "Best method - end-to-end image to calorie"
+    },
+    "two_stage_gt_category": {
+      "method": "Two-Stage (GT Category + Mass Regression)",
+      "calories_mae": 135.99,
+      "mass_mae": 68.79,
+      "calories_r2": 0.053,
+      "notes": "Uses calorie density lookup table with ground truth categories"
+    },
+    "category_baseline": {
+      "method": "Category Mean Baseline",
+      "calories_mae": 153.43,
+      "calories_r2": 0.050,
+      "notes": "Simple baseline using mean calories per food category"
+    },
+    "end_to_end_multi_task": {
+      "method": "End-to-End Multi-Task (ARCHITECTURAL BUGS)",
+      "calories_mae_raw": 269.96,
+      "classification_accuracy": 44.89,
+      "status": "NOT RECOMMENDED - requires retraining",
+      "notes": "Model has multiple architectural bugs preventing proper evaluation"
+    }
+  },
+
+  "model_architectures": {
+    "classifier": {
+      "efficientnet": {
+        "backbone": "EfficientNet-B0 (pretrained ImageNet)",
+        "head": "FC [1280 -> 154]",
+        "total_params": "~5M"
+      },
+      "vit": {
+        "backbone": "ViT-B/16 (pretrained ImageNet)",
+        "head": "FC [768 -> 154]",
+        "total_params": "~86M"
+      }
+    },
+    "regression": {
+      "backbone": "EfficientNet-B0 (frozen)",
+      "regressor": "MLP [1280 -> 512 -> 256 -> 128 -> 5]",
+      "output": "[calories, protein, carb, fat, mass]",
+      "total_params": "~5M"
+    },
+    "end_to_end": {
+      "segmentation": "Mask R-CNN (ResNet50-FPN)",
+      "classifier": "EfficientNet-B0",
+      "regressor": "MLP with geometric features",
+      "total_params": "~49.8M",
+      "status": "BUGGY - see architectural issues"
+    }
+  },
+
+  "key_findings": [
+    "EfficientNet-B0 achieves 64.05% top-1 accuracy on 154-class food classification",
+    "ViT-B/16 achieves 42.16% top-1 accuracy (limited by dataset size)",
+    "Direct regression achieves best calorie MAE (94.32 kcal)",
+    "Two-stage approach with GT categories: 135.99 kcal MAE",
+    "Category mean baseline: 153.43 kcal MAE",
+    "Mass estimation MAE: ~57-69g across methods"
+  ],
+
+  "limitations": [
+    "Limited test set size (676 samples)",
+    "High MAPE values due to samples with near-zero calorie counts",
+    "End-to-end model has multiple architectural bugs",
+    "ViT requires more data to reach optimal performance",
+    "Segmentation evaluation limited (no ground truth masks in dataset)"
+  ],
+
+  "evaluation_notes": {
+    "classifier_evaluation": "Fixed backbone detection from state_dict keys (config was incorrect)",
+    "regression_evaluation": "Using pre-computed normalization stats from training data",
+    "end_to_end_evaluation": "Model has architectural bugs - results unreliable"
+  },
+
+  "end_to_end_architectural_bugs": {
+    "status": "CRITICAL - Fundamental Training/Inference Architecture Mismatch",
+    "retrained_model_results": {
+      "checkpoint": "experiments/end_to_end/checkpoints/best.pth (Epoch 31)",
+      "training_metrics": {
+        "val_loss": 80.09,
+        "val_accuracy": "58.9%",
+        "status": "Training completed successfully"
+      },
+      "evaluation_with_threshold_0.5": {
+        "empty_detection_rate": "75.59%",
+        "raw_mae": 1084.84,
+        "classification_accuracy": "1.21%"
+      },
+      "evaluation_with_threshold_0.05": {
+        "empty_detection_rate": "10.5%",
+        "raw_mae": 2675.59,
+        "classification_accuracy": "1.98%"
+      }
+    },
+    "fundamental_issue": {
+      "description": "Training/Inference Target Mismatch",
+      "training_behavior": "Model learns: GT_box → Total_dish_calories (single instance predicts entire dish)",
+      "inference_behavior": "Multiple detected instances each predict 'total dish calories', then aggregated (summed)",
+      "result": "If 3 instances detected, each predicting ~300 kcal (total dish), aggregation gives 900 kcal instead of 300"
+    },
+    "bugs_fixed_in_retrain": [
+      "Image normalization consistency between training_forward() and forward()",
+      "NaN prevention via gradient clipping (max_grad_norm=1.0) and loss scaling (regression_loss_scale=0.001)"
+    ],
+    "remaining_unfixable_issues": [
+      "Training uses single GT box per sample but inference detects multiple instances",
+      "Model cannot distinguish between 'per-instance calories' vs 'total dish calories'",
+      "Aggregation strategy fundamentally incompatible with training objective"
+    ],
+    "conclusion": "End-to-End model has FUNDAMENTAL ARCHITECTURE MISMATCH that cannot be fixed without redesigning the training approach. The model learns to predict total dish calories from a single box, but inference aggregates multiple such predictions.",
+    "recommendation": "Use Direct Regression model (MAE: 94.32 kcal) for production use. End-to-End approach requires complete redesign."
+  },
+
+  "recommended_models": {
+    "classification": {
+      "model": "EfficientNet-B0",
+      "top1_accuracy": 64.05,
+      "checkpoint": "experiments/FoodClassifier_classification/checkpoints/best.pth"
+    },
+    "calorie_estimation": {
+      "model": "Direct Regression (EfficientNet + MLP)",
+      "calories_mae": 94.32,
+      "checkpoint": "experiments/CalorieRegressor_regression/checkpoints/best.pth"
+    }
+  }
+}
